@@ -1,7 +1,11 @@
 import pika
-import random
-import string
-from .middleware import MessageMiddlewareQueue, MessageMiddlewareExchange
+from .middleware import (
+    MessageMiddlewareQueue, 
+    MessageMiddlewareExchange,
+    MessageMiddlewareMessageError,
+    MessageMiddlewareDisconnectedError,
+    MessageMiddlewareCloseError
+)
 
 MAX_MESSAGES_PER_WORKER = 1
 
@@ -13,13 +17,46 @@ class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
         self.channel.queue_declare(queue=self.queue_name)
         self.channel.basic_qos(prefetch_count=MAX_MESSAGES_PER_WORKER)
 
-    def send(self, message):
-        self.channel.basic_publish(
-            exchange='',
-            routing_key=self.queue_name, 
-            body=message
-        )
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
 
+    def _cleanup_resources(self):
+        if self.channel and self.channel.is_open:
+            try:
+                self.channel.close()
+            except Exception:
+                pass
+        
+        if self.connection and self.connection.is_open:
+            try:
+                self.connection.close()
+            except Exception:
+                pass
+            
+        self.channel = None
+        self.connection = None
+
+    def send(self, message):
+        try:
+            self.channel.basic_publish(
+                exchange='',
+                routing_key=self.queue_name, 
+                body=message
+            )
+        except pika.exceptions.AMQPConnectionError as e:
+            self._cleanup_resources()
+            raise MessageMiddlewareDisconnectedError("Conexión perdida al enviar a la cola") from e
+        except pika.exceptions.AMQPChannelError as e:
+            self._cleanup_resources()
+            raise MessageMiddlewareMessageError("Error de canal al enviar a la cola") from e
+        except Exception as e:
+            self._cleanup_resources()
+            raise MessageMiddlewareMessageError("Error interno inesperado al enviar") from e
+        
     def start_consuming(self, on_message_callback):
         
         def internal_callback(ch, method, properties, body):
@@ -34,15 +71,38 @@ class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
             on_message_callback=internal_callback,
             auto_ack=False
         )
-        self.channel.start_consuming()
+
+        try:  
+          self.channel.start_consuming()
+        except pika.exceptions.AMQPConnectionError as e:
+            self._cleanup_resources()
+            raise MessageMiddlewareDisconnectedError(f"Conexión perdida con RabbitMQ") from e
+        except pika.exceptions.AMQPChannelError as e:
+            self._cleanup_resources()
+            raise MessageMiddlewareMessageError(f"Error en el canal de RabbitMQ") from e
+        except Exception as e:
+            self._cleanup_resources()
+            raise MessageMiddlewareMessageError(f"Error interno inesperado") from e
 
     def stop_consuming(self):
-        if self.channel:
-            self.channel.stop_consuming()
+        try:
+          if self.channel:
+              self.channel.stop_consuming()
+        except pika.exceptions.AMQPConnectionError as e:
+            self._cleanup_resources()
+            raise MessageMiddlewareDisconnectedError(f"Conexión perdida con RabbitMQ") from e
+        except pika.exceptions.AMQPChannelError as e:
+            self._cleanup_resources()
+            raise MessageMiddlewareMessageError(f"Error en el canal de RabbitMQ") from e
+        except Exception as e:
+            self._cleanup_resources()
+            raise MessageMiddlewareMessageError(f"Error interno inesperado") from e
 
     def close(self):
-        if self.connection and self.connection.is_open:
-            self.connection.close()
+        try:
+            self._cleanup_resources()
+        except Exception as e:
+            raise MessageMiddlewareCloseError("Error al cerrar la conexión de la cola") from e
 
 
 class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
@@ -52,7 +112,30 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
         self.routing_keys = routing_keys
         self.exchange_name = exchange_name
         self.channel.exchange_declare(exchange=self.exchange_name, exchange_type='direct')
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
+    def _cleanup_resources(self):
+        if self.channel and self.channel.is_open:
+            try:
+                self.channel.close()
+            except Exception:
+                pass 
         
+        if self.connection and self.connection.is_open:
+            try:
+                self.connection.close()
+            except Exception:
+                pass
+            
+        self.channel = None
+        self.connection = None
+  
     def start_consuming(self, on_message_callback):
         def internal_callback(ch, method, properties, body):
             on_message_callback(
@@ -67,30 +150,64 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
         )
         queue_name = result.method.queue
 
-        for routing_key in self.routing_keys:
-            self.channel.queue_bind(
-                exchange=self.exchange_name,
-                queue=queue_name,
-                routing_key=routing_key
-            )
-        self.channel.basic_consume(
-            queue=queue_name,
-            on_message_callback=internal_callback,
-            auto_ack=False
-        )
-        self.channel.start_consuming()
+        try:  
+          for routing_key in self.routing_keys:
+              self.channel.queue_bind(
+                  exchange=self.exchange_name,
+                  queue=queue_name,
+                  routing_key=routing_key
+              )
+          self.channel.basic_consume(
+              queue=queue_name,
+              on_message_callback=internal_callback,
+              auto_ack=False
+          )
+          self.channel.start_consuming()
+        except pika.exceptions.AMQPConnectionError as e:
+            self._cleanup_resources()
+            raise MessageMiddlewareDisconnectedError(f"Conexión perdida con RabbitMQ") from e
+        except pika.exceptions.AMQPChannelError as e:
+            self._cleanup_resources()
+            raise MessageMiddlewareMessageError(f"Error en el canal de RabbitMQ") from e
+        except Exception as e:
+            self._cleanup_resources()
+            raise MessageMiddlewareMessageError(f"Error interno inesperado") from e
+
     
     def stop_consuming(self):
-        if self.channel:
+        try:         
+          if self.channel:
             self.channel.stop_consuming()
+        except pika.exceptions.AMQPConnectionError as e:
+            self._cleanup_resources()
+            raise MessageMiddlewareDisconnectedError(f"Conexión perdida con RabbitMQ") from e
+        except pika.exceptions.AMQPChannelError as e:
+            self._cleanup_resources()
+            raise MessageMiddlewareMessageError(f"Error en el canal de RabbitMQ") from e
+        except Exception as e:
+            self._cleanup_resources()
+            raise MessageMiddlewareMessageError(f"Error interno inesperado") from e
     
     def send(self, message):
-        for routing_key in self.routing_keys:
-            self.channel.basic_publish(
-                exchange=self.exchange_name,
-                routing_key=routing_key,
-                body=message
-            )  
+        try:
+            for routing_key in self.routing_keys:
+                self.channel.basic_publish(
+                    exchange=self.exchange_name,
+                    routing_key=routing_key,
+                    body=message
+                )
+        except pika.exceptions.AMQPConnectionError as e:
+            self._cleanup_resources()
+            raise MessageMiddlewareDisconnectedError("Conexión perdida al publicar en el exchange") from e
+        except pika.exceptions.AMQPChannelError as e:
+            self._cleanup_resources()
+            raise MessageMiddlewareMessageError("Error de canal al publicar en el exchange") from e
+        except Exception as e:
+            self._cleanup_resources()
+            raise MessageMiddlewareMessageError("Error interno inesperado al enviar") from e
+    
     def close(self):
-        if self.connection and self.connection.is_open:
-            self.connection.close()
+        try:
+          self._cleanup_resources()
+        except Exception as e:
+            raise MessageMiddlewareCloseError("Error al cerrar la conexión del exchange") from e
