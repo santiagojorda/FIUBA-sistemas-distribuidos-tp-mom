@@ -3,12 +3,15 @@ import random
 import string
 from .middleware import MessageMiddlewareQueue, MessageMiddlewareExchange
 
+MAX_MESSAGES_PER_WORKER = 1
+
 class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
     def __init__(self, host, queue_name):
         self.connection = pika.BlockingConnection(pika.ConnectionParameters(host=host))
         self.channel = self.connection.channel()
         self.queue_name = queue_name
         self.channel.queue_declare(queue=self.queue_name)
+        self.channel.basic_qos(prefetch_count=MAX_MESSAGES_PER_WORKER)
 
     def send(self, message):
         self.channel.basic_publish(
@@ -49,7 +52,7 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
         self.routing_keys = routing_keys
         self.exchange_name = exchange_name
         self.channel.exchange_declare(exchange=self.exchange_name, exchange_type='direct')
-    
+        
     def start_consuming(self, on_message_callback):
         def internal_callback(ch, method, properties, body):
             on_message_callback(
